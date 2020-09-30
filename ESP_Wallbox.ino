@@ -1,9 +1,7 @@
 /*---------------------------------------------------
-Wallbox Webserver for ESP32 
-
+eine smarte Wallbox mit Webserver for ESP32 auf Basis Arduino 
 
 by Jan Schuster - free for anyone
-
 
 Komponenten: 
 - Netzteil: 12Volt Input; 5V(XD-45 MH mini); -12V Max765 https://datasheets.maximintegrated.com/en/ds/MAX764-MAX766.pdf   
