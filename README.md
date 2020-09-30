@@ -28,11 +28,11 @@ Die Ladestärke ist über die Weboberfläche einstellbar (6A, 10A, 15A...). Gege
 Die Ladestärke wird über den DutyCycle am ESP32 (GPIO23) gesteuert. 
 
 Sinkt der Ladezustand der Hausbatterie weil die Solaranlage nicht genügend Strom liefert, wird das CP Signal über den ESP32 (GPIO18)
-getrennt. Dadurch wird Ladung unterbrochen. Die Trennung ist erforderlich damit das Auto nicht "einschläft".  
+getrennt. Dadurch wird die Aufladung des Fahrzeuges unterbrochen. Die Trennung ist erforderlich damit das Auto nicht "einschläft".  
 
 Das PWM Signal der CP Leitung wird ständigg über den AD Wandler überwacht und beeinflusst die nachfolgende Steuerung.      
 
-In der Weboberfläche werden die aktuellen Leistungsdaten (SoC, sowie Solarerzeugung) aus der eigenen Solaranlage angezeigt. 
+In der Weboberfläche werden die aktuellen Leistungsdaten (SoC, sowie Erzeugung der Solaranlage) aus der eigenen Solaranlage angezeigt. 
 Die Werte werden aus der FEMS von Fenecon per Rest ausgelesen https://www1.fenecon.de/fems/    
 Desweiteren wird der aktuelle Status des Fahrzeuges in der Weboberfläche angezeigt.
 
