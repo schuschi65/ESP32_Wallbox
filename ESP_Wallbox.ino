@@ -5,20 +5,33 @@ Wallbox Webserver for ESP32
 by Jan Schuster - free for anyone
 
 
+Komponenten: 
+- Netzteil: 12Volt Input; 5V(XD-45 MH mini); -12V Max765 https://datasheets.maximintegrated.com/en/ds/MAX764-MAX766.pdf   
+- Prozessor ESP32 Dev Kit
+- Digole Display (I2C)
+- AD Wandler ADS1115 (I2C)
+- Levelshift für CP-Signal auf 5 Volt 
+- TYP2 CP-Signalisierung und Messung basiert auf der Arbeit von Michi siehe:  https://www.goingelectric.de/forum/viewtopic.php?f=34&t=22216&sid=3b178d1b2e110f8db5921a5a3405d0a5
+- 2xRelais (Signalrelais für CP signal Ein/Ausschaltung. Relais zum schalten des Schützes)   
+
+Software:
+- HTTP Server zur Steuerung und Visualisierung 
+- Rest API FENECON Pro Hybrid 10-Serie siehe: https://docs.fenecon.de/de/_/latest/fems/apis.html#_fems_app_restjson_api_lesend
+- UDP Interface zur weiteren Nutzung der Messwerte Inhouse
 
 ---------------------------------------------------*/
 #define SC_W 160  //screen width in pixels
 #define SC_H 128  //screen Hight in pixels
-#define _Digole_Serial_I2C_  //To tell compiler compile the special communication only, 
-#include <DigoleSerial.h>
+#define _Digole_Serial_I2C_           //To tell compiler compile the special communication only, 
+#include <DigoleSerial.h>             //https://www.digole.com/forum.php?topicID=1
 #include <esp_wifi.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include "time.h"
-#include <DNSServer.h>            //Local DNS Server used for redirecting all requests to the configuration portal
-#include <ESP_WiFiManager.h>          //https://github.com/tzapu/WiFiManager WiFi Configuration Magic
+#include <DNSServer.h>                  //Local DNS Server used for redirecting all requests to the configuration portal
+#include <ESP_WiFiManager.h>            //https://github.com/khoih-prog/ESP_WiFiManager
 #include <WiFiUdp.h>
 DigoleSerialDisp mydisp(&Wire,'\x29');  //I2C:Arduino UNO: SDA (data line) is on analog input pin 4, and SCL (clock line) is on analog input pin 5
 #include <ADS1115_WE.h>
@@ -34,18 +47,17 @@ WiFiUDP Udp;
 unsigned int localUdpPort = 4210;
 // WLAN where we want to be client - put your SSID/password here
 char* uissid = "schuschi@konfig";
-char* password = "schuschi17";
+char* password = "123456";         // Passwort lediglich für den lokalen AP dort findet die WLAN konfig statt.
 // SSID and PW for your Router
 String Router_SSID;
 String Router_Pass;
-
 String SensorName="Default";      // Name des Sensors
 /////////////////////////////////////////////////////////////////////////
 //                             FEMS Rest API (Daten aus der Hausanlage)
 ////////////////////////////////////////////////////////////////////////
 byte fSOC;                            //Aktueller State of Charge der Batterie 
 float fPower;                          // Power von Solaranlage  
-byte setSOC=15;                       // Defaultwert SOC aus Config.html
+byte setSOC=75;                       // Defaultwert SOC aus Config.html
 String setIP="192.168.1.24";          // Defaultwerte für FEMS REST API
 /////////////////////////////////////////////////////////////////////////
 //                             ntp timestamp
@@ -53,13 +65,15 @@ String setIP="192.168.1.24";          // Defaultwerte für FEMS REST API
 time_t Startup_time, Start_Load, cur_time, Stop_Load;              // Startup Time des Sensors, Start_load Car , Current time
 unsigned long check_sum;          // Distance to Check Summertime
 unsigned long ulcurrentmillis;
-unsigned long last_pub;           // Distance to MQTT Publish
-unsigned long refresh_Home;
-unsigned long ulReconncount;       // how often did we connect to WiFi
-unsigned long ulMeasCount=0;    // values already measured
-unsigned long ulNoMeasValues=0; // size of array
-unsigned long ulMeasDelta_ms;   // distance to next meas time
-unsigned long ulNextMeas_ms;    // next meas time
+unsigned long last_pub;              // Distance to MQTT Publish
+unsigned long refresh_Home;          // Timer to refresh Display
+unsigned long ulReconncount;         // how often did we connect to WiFi
+unsigned long ulMeasCount=0;         // values already measured
+unsigned long ulNoMeasValues=0;      // size of array
+unsigned long ulMeasDelta_ms;        // distance to next meas time
+unsigned long ulNextMeas_ms;         // next meas time
+unsigned long ulNextPrint_ms;        // next display change time
+unsigned long ulPrintDelta_ms =1500; // Display Aktualisierung
 unsigned long *pulTime;         // array for time points of measurements
 int *pfSOC,*pfSolar;             // SOC Battery; PowerSolar  
 unsigned long ulReqcount;       // how often has a valid page been requested
@@ -133,14 +147,11 @@ unsigned long letzte_Messung, CP_Messung;
 bool Ergebnis_korrekt=false;
 byte Betriebsphase = 0;
 float Progress=0;
-int16_t CP_Plus [10], CP_Minus [10];  // Arrays für die 100-fache Messung der positiven und negativen Spannung am CP-Pin
-byte CP_Status[9];  // Zählt, wie viele Messwerte von welcher Kategorie es jeweils gibt.
-byte Status_Fahrzeug = 255; // Bei erfolgreicher Messung des Fahrzeugstatus wird dieser hier gespeichert. 
-                           //  Mögliche Werte sind PLUS_12_V, PLUS_9_V, PLUS_6_V, PLUS_3_V und MINUS_12_V. 255 bedeutet: Status wurde noch nicht erkannt.
-#define START_STROMSTAERKE_DREIPHASIG 0  // gibt an, welche Stromstärke bei dreiphasigem Anschluss voreingestellt ist (Ladevorgang startet nicht selbstständig). Hier 16 A.
+int16_t CP_Plus [10], CP_Minus [10];  // Arrays für die 10-fache Messung der positiven und negativen Spannung am CP-Pin
+byte CP_Status[9];                    // Zählt, wie viele Messwerte von welcher Kategorie es jeweils gibt.
+byte Status_Fahrzeug = 255;           // Bei erfolgreicher Messung des Fahrzeugstatus wird dieser hier gespeichert. 
+                                      //  Mögliche Werte sind PLUS_12_V, PLUS_9_V, PLUS_6_V, PLUS_3_V und MINUS_12_V. 255 bedeutet: Status wurde noch nicht erkannt.
     
-// Durch die folgenden Werte werden die ADC-Messwerte dividiert, um die Spannung am CP-Pin zu erhalten.
-
 #define CP_TIMEOUT 1500  // gibt an, nach welcher Zeit (in Millisekunden) ein Ladevorgang abgebrochen wird, wenn der Status des E-Autos nicht ermittelt werden kann.
 byte Pulsweite, letzte_Pulsweite;  // Speichert die aktuelle Pulsweite des CP-Signals. 0 bedeutet 0 %, 255 bedeutet 100 %.
 byte Ladekabel_max;  // Speichert die maximal mögliche Pulsweite aufgrund der Belastbarkeit des Ladekabels. 255 bedeutet: kein Ladekabel angeschlossen.
@@ -150,11 +161,17 @@ byte Stromstaerke=1; // Wertebereich: 0 bis 4. Speichert die eingestellte Ladest
 // Es handelt sich um 8-Bit-Werte, d.h. 0 bedeutet 0 % Pulsweite, 255 bedeutet 100 % Pulsweite.
 //10%=6A; 16%=9,6A; 25%=15A; 30%=18A; 40%=24A; 50%=30A; 60%=36A;
 const byte PULSWEITE [5] = {   255*10/100,   255*16/100, 255*25/100 , 255*30/100,  255*40/100};    // 6A, 9,6A, 15A, 18A, 24A
-//PWM to Spannung 1000 hz = 1 ms
-// Um=Uaus+((Uein−Uaus)⋅tein/(tein+taus))  Uaus=-12V Uein=12V  tein=1000*Pulsweite/255 taus=1000-tein=1000-(1000*Pulsweite/255) 
+
+// Durch die folgenden Werte werden die ADC-Messwerte dividiert, um die Spannung am CP-Pin zu erhalten.
+// PWM to Spannung 1000 hz = 1 ms: Um=Uaus+((Uein−Uaus)⋅tein/(tein+taus))  Uaus=-12V Uein=12V  tein=1000*Pulsweite/255 taus=1000-tein=1000-(1000*Pulsweite/255)  
 const uint16_t  FAKTOR_PLUS[5]={9,17,29,34,44};
 const byte STROM[5] = { 6, 10 , 15 , 18 , 24 };
 byte Fehlercode = 0;  // 0 bedeutet: kein Fehler. Andere mögliche Werte sind die mit F_ gekennzeichneten Konstanten (siehe oben unter DEFINITIONEN).
+
+// setting PWM properties for ESP32
+#define freq            1000
+#define CP_Channel      0
+#define resolution      8
 
 // Folgenden Wert zu true ändern, um Statusinformationen über die serielle Schnittstelle ausgeben zu lassen. Dies reduziert allerdings
 // die Reaktionsgeschwindigkeit und Sicherheit der Ladebox und sollte daher nur zur Fehlersuche verwendet werden.
@@ -166,10 +183,7 @@ byte Fehlercode = 0;  // 0 bedeutet: kein Fehler. Andere mögliche Werte sind di
 #define O_WAKEUP          18  // Ansteuerung des Relais für CP Signalunterbrechung (Fahrzeuge schlafen ein) dient zum aufwecken des Fahrzeugs
 #define O_LADUNG          19  // Ansteuerung der Relais bzw. des Schütz zur Stromzufuhr zum Elektrofahrzeug
 #define O_CP_SIGNAL       23  // Ausgabe des ±12-V-PWM-Signals am CP-Pin, durch welches dem Elektrofahrzeug die mögliche Ladestromstärke mitgeteilt wir
-// setting PWM properties
-#define freq            1000
-#define CP_Channel      0
-#define resolution      8
+
 // Mithilfe der folgenden Fehlercodes kann die Fehlerursache identifiziert werden. So oft blinkt die Fehler-LED (es wird immer nur der jeweils erste erkannte Fehler angezeigt).
 #define F_TEMP_MAX         1  // Höchsttemperatur überschritten
 #define F_TEMP_MIN         2  // Mindesttemperatur unterschritten (vermutlich Temperatursensor defekt oder Auswertung fehlerhaft)
@@ -200,13 +214,11 @@ byte Fehlercode = 0;  // 0 bedeutet: kein Fehler. Andere mögliche Werte sind di
 // Weitere Kategorie für zu hohe Messwerte der positiven und negativen Spannung an CP (Index für Array CP_Status):
 #define ZU_HOHE_SPANNUNG    9
 
-
-
 byte Ergebnis;
-int freeheap;
-////////////////////////////////////////////////////////////////////////////////////////
 
+////////////////////////////////////////////////////////////////////////////////////////
 // storage for Measurements; keep some mem free; allocate remainder
+int freeheap;
 #define KEEP_MEM_FREE 185000
 #define MEAS_SPAN_H 25
 
@@ -220,13 +232,9 @@ WiFiServer server(80);
 //Analog digital Wandler ADS1115
 //////////////////////////////
 ADS1115_WE ads = ADS1115_WE();
-//Adafruit_ADS1115 ads;  /* Use this for the 16-bit version */
 
-int toprint = 0;
-unsigned long ulNextPrint_ms;        // next display change time
-unsigned long ulPrintDelta_ms =1500; // Display aktualisierung
+
 // needed to avoid link error on ram check
-
 void FreeHEAP() {
   if ( ESP.getFreeHeap() < freeheap ) {
     if ( ( freeheap != KEEP_MEM_FREE) ) {
@@ -238,10 +246,10 @@ void FreeHEAP() {
     freeheap = ESP.getFreeHeap();
   }
 }
+// Helper to String
 String uint64ToString(uint64_t input) {
   String result = "";
   uint8_t base = 10;
-
   do {
     char c = input % base;
     input /= base;
@@ -260,9 +268,8 @@ String uint64ToString(uint64_t input) {
 void setup() 
 {
   Wire.begin();
-   // configure LED PWM functionalitites
+   // configure PWM functionalitites
   ledcSetup(CP_Channel, freq, resolution);
-  
   // attach the channel to the GPIO to be controlled
   ledcAttachPin(O_CP_SIGNAL, CP_Channel);
   // setup globals
@@ -270,8 +277,9 @@ void setup()
   pinMode(O_WAKEUP, OUTPUT); // Setzt den Digitalpin 18 als Outputpin
   ulReqcount=0; 
   ulReconncount=0;
- // start serial
+  // start serial
   Serial.begin(115200);
+  // start Display
   mydisp.begin();
   mydisp.clearScreen();
   mydisp.setColor(191);
@@ -301,19 +309,16 @@ void setup()
   if(!ads.init()){
      Serial.println("ADS1115 not connected!");
   }   
+  //AD Settings
   ads.setVoltageRange_mV(ADS1115_RANGE_2048); //comment line/change parameter to change range 
   ads.setCompareChannels(ADS1115_COMP_0_GND);
-  //ads.setCompareChannels(ADS1115_COMP_1_GND);
-  //ads.setCompareChannels(ADS1115_COMP_2_GND);
-  //ads.setCompareChannels(ADS1115_COMP_3_GND);
   ads.setMeasureMode(ADS1115_CONTINUOUS);
   ads.setConvRate(ADS1115_64_SPS);
-
   
   uint32_t free=system_get_free_heap_size() - KEEP_MEM_FREE;
   Serial.print("freeHeap:");
   Serial.println(free);
-  ulNoMeasValues = free / (sizeof(int)*2+sizeof(unsigned long));  // SOC Power Solar + time 
+  ulNoMeasValues = free / (sizeof(int)*2+sizeof(unsigned long));  // SOC+PowerSolar+time 
   Serial.print("number Messuresvalues:");
   Serial.println(ulNoMeasValues);
   pulTime = new unsigned long[ulNoMeasValues];
@@ -341,8 +346,6 @@ void setup()
   }
   delay(random(2000));
   WiFiStart();
-  //espClient.setNoDelay(true);
-  //espClient.setSync(true);
   
   FreeHEAP();
   freeheap = ESP.getFreeHeap();
@@ -352,7 +355,7 @@ void setup()
   // Print the IP address
   Serial.println(WiFi.localIP());
   homescreen();
-  refresh_Home=millis()+(1000*3600);  //Homescreen refresh jede Stunde
+  refresh_Home=millis()+(1000*3600);  //Display refresh jede Stunde
   letzte_Messung = millis();
   digitalWrite( O_WAKEUP, HIGH );  // Schalte CP Signal zum Auto an.
 }
@@ -367,8 +370,6 @@ void WiFiStart()
   deviceID =  uint64ToString(ESP.getEfuseMac());     // IoT thing device ID - unique device id in our project
   freeheap = ESP.getFreeHeap();
   ulReconncount++;
-  //uissid = "schuschi@konfig";
-  //password = "schuschi17";
   mydisp.setColor(191);
   mydisp.drawStr(0, 0, "....Connecting");
   ESP_WiFiManager wifiManager;  
@@ -379,7 +380,7 @@ void WiFiStart()
   Router_Pass = wifiManager.WiFi_Pass();
   
   //Remove this line if you do not want to see WiFi password printed
-  Serial.println("Stored: SSID = " + Router_SSID + ", Pass = " + Router_Pass);
+  //Serial.println("Stored: SSID = " + Router_SSID + ", Pass = " + Router_Pass);
   
   //Check if there is stored WiFi router/password credentials.
   //If not found, device will remain in configuration mode until switched off via webserver.
@@ -411,16 +412,12 @@ void WiFiStart()
   startedAt = millis();  
   while ( (WiFi.status() != WL_CONNECTED) && (millis() - startedAt < WIFI_CONNECT_TIMEOUT ) )
   {   
-   
     WiFi.mode(WIFI_STA);
     WiFi.persistent (true);
     // We start by connecting to a WiFi network
-    
     Serial.print("Connecting to ");
     Serial.println(Router_SSID);
     WiFi.begin(Router_SSID.c_str(), Router_Pass.c_str());
-   
-
     int i = 0;
     while((!WiFi.status() || WiFi.status() >= WL_DISCONNECTED) && i++ < WHILE_LOOP_STEPS)
     {
@@ -541,7 +538,6 @@ unsigned long MakeTable (WiFiClient *pclient, bool bStream)
 unsigned long MakeList (WiFiClient *pclient, bool bStream)
 {
   unsigned long ulLength=0;
-  
   // here we build a big list.
   // we cannot store this in a string as this will blow the memory   
   // thus we count first to get the number of bytes and later on 
@@ -608,15 +604,10 @@ unsigned long MakeList (WiFiClient *pclient, bool bStream)
 }
 
 // ADC1115 Lese Wert aus ADC mit ADS1115_CONTINUOUS
-//
-// !!!!!IMPORTANT: Wichtig ist das Settup des AD Wandlers! 
+// !!!!!IMPORTANT: Wichtig ist das Setup des AD Wandlers! 
 // Zu schnell eingestellt, wird bei niedrigem DutyCycle die Low Phase gemessen.
-//
 float readChannel(ADS1115_MUX channel) {
   float voltage = 0.0;
-  //ads.setCompareChannels(channel);
-  //ads.startSingleMeasurement();
-  //while(ads.isBusy()){}
   ads.setCompareChannels(channel); //comment line/change parameter to change channel
   delay(10);
   voltage = ads.getResult_mV(); // alternative: getResult_mV for Millivolt
@@ -641,15 +632,11 @@ bool CP_messen(){
   for(byte index = 0; index < 10; index++) {
     // Berechnung der positiven und negativen Spannung:
     float Spannung_Plus;
-    if(Pulsweite==255)     Spannung_Plus= (float)(CP_Plus[index]/133.3); //165 war es auch schon :-(
+    if(Pulsweite==255)     Spannung_Plus= (float)(CP_Plus[index]/133.3); //Divisor muß mit dem Messgerät ermittelt werden
     else if (Pulsweite==0) Spannung_Plus=0;
     else                   Spannung_Plus= (float)(CP_Plus[index]/FAKTOR_PLUS[Stromstaerke]);
-    //Serial.print(" fSpannung+: "); 
-    //Serial.println(Spannung_Plus);
     cp_P_durchschnitt +=Spannung_Plus;
-    float Spannung_Minus = (float)CP_Minus[index]/165;   // CP_MINUS_FAKTOR
-    //Serial.print(" fSpannung-: "); 
-    //Serial.println(Spannung_Minus);
+    float Spannung_Minus = (float)CP_Minus[index]/165;   //Divisor muß mit dem Messgerät ermittelt werden
     debug( " +" + String(Spannung_Plus, 2) + " V, -" + String(Spannung_Minus, 2) + " V," );
     
     // Auswertung der positiven Spannung:
@@ -684,7 +671,7 @@ bool CP_messen(){
   else if(  CP_Status[PLUS_3_V] > CP_Status[PLUS_12_V] &&  CP_Status[PLUS_3_V] > CP_Status[PLUS_9_V] &&  CP_Status[PLUS_3_V] > CP_Status[PLUS_6_V] ) Ergebnis = PLUS_3_V;
   else Ergebnis = PLUS_UNDEFINIERT;
   
-  //Debug:  
+  //zur Entwicklung nützlich: Debug wenn die Messwerte nicht korrekt:  
   if ( Ergebnis == PLUS_UNDEFINIERT){
    Serial.print("CP zu hoch anzahl: ");
    Serial.println(CP_Status[ZU_HOHE_SPANNUNG]);
@@ -720,49 +707,11 @@ bool CP_messen(){
   Ergebnis_korrekt &= ( CP_Status[PLUS_6_V]  == 0 || ( Ergebnis != PLUS_3_V && Ergebnis != MINUS_12_V ) );
   Ergebnis_korrekt &= ( CP_Status[PLUS_3_V]  == 0 || Ergebnis != MINUS_12_V );
   Ergebnis_korrekt &= ( CP_Status[PLUS_UNDEFINIERT] == 0 || Ergebnis != MINUS_12_V );
-  //debug( String( Ergebnis_korrekt ) + ", " );
-  //Serial.print("Kein Messwert höher (1=i.o): "); 
-  //Serial.println(Ergebnis_korrekt); 
-  //Ermittle anhand einer Formel, wie viele Messwerte vom ermittelten Status es mindestens geben muss, damit das Ergebnis akzeptiert werden kann:
-  //byte Mindestanzahl_Werte_Plus = ( ((float)Pulsweite * (float)Pulsweite / 1000.0 ) + ( (float)Pulsweite / 10.0 ))/10 ;
+ 
   byte Mindestanzahl_Werte_Plus = 7 ;
-  //Serial.print("Mindestanzahl_Werte_Plus: ");
-  //Serial.println(Mindestanzahl_Werte_Plus); 
-  //Ergebnis_korrekt &= ( CP_Status[NICHT_NEGATIV] >= Mindestanzahl_Werte_Plus );
-  //debug( String( Ergebnis_korrekt ) + ", " );
-  //Serial.print("Ergebnis (nicht negativ): ");
-  //Serial.println(Ergebnis_korrekt); 
   Ergebnis_korrekt &= ( CP_Status[Ergebnis]      >= Mindestanzahl_Werte_Plus );
-  //debug( String( Ergebnis_korrekt ) + ", " );
-  //Serial.print("Ergebnis gesamt: ");
-  //Serial.println(Ergebnis_korrekt);  
-  // Ermittle anhand einer Formel, wie viele Messwerte von -12 V es mindestens geben muss, damit das Ergebnis akzeptiert werden kann:
-  //byte Pulsweite_N = 255 - Pulsweite;
-  //byte Mindestanzahl_Werte_Minus = ( (float)Pulsweite_N * (float)Pulsweite_N / 1000.0 ) + ( (float)Pulsweite_N / 10.0 ) ;
-  //byte Mindestanzahl_Werte_Minus = 8 ;
-  //Ergebnis_korrekt &= ( CP_Status[NICHT_NEGATIV] >= Mindestanzahl_Werte_Minus );
-  //debug( String( Ergebnis_korrekt ) + ", " );
-  //Serial.print("Ergebnis mindestanzahl Minus: ");
-  //Serial.println(Ergebnis_korrekt); 
-  //if( CP_Status[MINUS_12_V]>0|| CP_Status[MINUS_12_V] < Mindestanzahl_Werte_Minus ) {
  
-    // Falls die negativen Messwerte zwischen 0,1 V und -11,2 V liegen, wird ein Diodenfehler vermutet (und der Ladevorgang abgebrochen):
-  //  if( Ergebnis_korrekt && CP_Status[MINUS_UNDEFINIERT] >= Mindestanzahl_Werte_Minus ){
-  //    Fehler( F_CP_DIODE );
-  //  }
-  //  else{
-  //    Ergebnis_korrekt = false;
-  //    Serial.print("Ergebnis Minus<Mindestanzahl unklar diese IF: ");
-  //    Serial.println(Ergebnis_korrekt); 
-  //  }
-  // } 
-  //debug( String( Ergebnis_korrekt ) + "\n" );
-  //Serial.print ("Ergebnis Prüfung (Variable Ergebnis_korrekt : ");
-  //Serial.println (Ergebnis_korrekt);
-  //Serial.print ("Ergebnis aus CP-Tabelle: ");
-  //Serial.println (Ergebnis); 
   if( Ergebnis == PLUS_UNDEFINIERT ) Ergebnis_korrekt=false; 
- 
   
   return (Ergebnis_korrekt);
 }
@@ -798,21 +747,13 @@ void loop()
      print_Line13(t);
      refresh_Home=millis()+(1000*3600);
   }
-  // Ladekabel fest auf 85:
-  
-  Ladekabel_max =  85;
+  // Ladekabel fest auf 85
+   Ladekabel_max =  85;
   
   
   //Timer CP Messung
   if (ulcurrentmillis>=CP_Messung||Pulsweite!=letzte_Pulsweite){
-      //Serial.println("//Beginn CP_messen");
-      //Serial.print("Pulsweite vor Messung: ");
-      //Serial.println(Pulsweite);
       Ergebnis_korrekt=CP_messen();
-      //Serial.print("Return CP_messen: ");
-      //Serial.println(Ergebnis_korrekt);
-      //Serial.println("End CP_messen//");
-      //if(Pulsweite==0) CP_Messung=ulcurrentmillis+50;
       CP_Messung=ulcurrentmillis+(500);
       letzte_Pulsweite=Pulsweite; 
   }
@@ -823,22 +764,15 @@ void loop()
       letzte_Messung = Millisekunden;  // Speichere den aktuellen Zeitpunkt.
   } 
   else if(Ergebnis != PLUS_UNDEFINIERT ){
-    //Serial.print("speichere Status_Fahrzeug : ");
-    //Serial.println(Ergebnis);
     Status_Fahrzeug = Ergebnis;  // Speichere das Ergebnis der Messung.
   }
 
   // Falls innerhalb einer festgelegten Zeit der Status des E-Autos nicht ermittelt werden konnte, beende den Ladevorgang:
   if( Millisekunden > letzte_Messung + CP_TIMEOUT ) {
     Fehler( F_CP_TIMEOUT );
-    //Serial.println("Timeout");
     letzte_Messung = Millisekunden;  // Variable setzen, als wäre eine korrekte Messung erfolgt, damit anschließend weitere Fehler erkannt werden können.
   }
-  //Serial.print("Betriebsphase: "); 
-  //Serial.println(Betriebsphase);
   if( Betriebsphase == 0 ) {  // Betriebsphase 0: Überprüfung, ob noch ein Fahrzeug vom letzten Ladevorgang angeschlossen ist, welches weitergeladen werden kann.
-     //Serial.print("Status_Fahrzeug: ");
-     //Serial.println(Status_Fahrzeug);
      switch( Status_Fahrzeug ) {
         case PLUS_12_V: // Wenn kein Fahrzeug angeschlossen ist, soll noch ein paar Sekunden gewartet werden. Dann wird in Betriebsphase 1 gewechselt:
            //Timer einbauen
@@ -849,7 +783,6 @@ void loop()
         break;
         case PLUS_6_V:
          CP_Signal_starten();
-        
         break;
         case PLUS_3_V:
         if( ADAPTERKOMPATIBILITAET && BELUEFTUNG ) CP_Signal_starten();
@@ -1038,6 +971,7 @@ void loop()
       mydisp.print(float(fPower/1000));
       mydisp.print("kW ");
     }
+    // todo: Ladestärke realwerte einbauen
     show_batterie(STROM[Stromstaerke]*235/1000,-5,49,244);
     mydisp.setFont(10);
     mydisp.setColor(191);
@@ -1062,7 +996,7 @@ void loop()
     //mydisp.print(0);
     //mydisp.print("kW ");
     
-    // Wenn kein Fahrzeug angeschlossen ist und die Initialisierung abgeschlossen, entriegele die Ladedose:
+    // Wenn kein Fahrzeug angeschlossen ist und die Initialisierung abgeschlossen
     if( Status_Fahrzeug == PLUS_12_V && Betriebsphase > 0 ){
        print_Line12("kein Auto angeschlossen  ");
     }
@@ -1195,7 +1129,7 @@ void loop()
     sHtmlHead = F("<html><head>");
     sHtmlHead +=F("<meta http-equiv=\"refresh\" content=\"");
     sHtmlHead +=ulMeasDelta_ms/1000;
-    sHtmlHead +=F(";URL=/grafik\">");
+    sHtmlHead +=F(";URL=/\">");
     sHtmlHead +=F("<title>Wallbox@");
     sHtmlHead +=SensorName;
     sHtmlHead += F("</title>");
@@ -1265,8 +1199,6 @@ void loop()
     sResponse += F("</font><br>");
     sResponse +=F("<div id=\"chart_div3\" style=\"float:left\"></div>");
     sResponse +=F("<div id=\"chart_div4\" ></div>");
-
-    //10%=6A; 16%=9,6A; 25%=15A; 30%=18A; 40%=24A; 50%=30A; 60%=36A;
     sRes2 += F("<p>");
     sRes2 += F("<a href=\"?pin=R6A\" class=\"button ");
     if (Stromstaerke==0) sRes2+=F("button3");
@@ -1597,7 +1529,7 @@ boolean summertime()
 }
 
 //////////////////////////
-// Screen Ausgabe
+// Display Ausgaben
 //////////////////////////
 void print_Line12(String to_print){
   if(to_print==sLine12)return;
@@ -1617,32 +1549,20 @@ void print_Line13(String to_print){
 }
 
 void homescreen(){
-  
-   mydisp.clearScreen();
-  
-  //byte rnd_Color=24; //Grün 
-  //mydisp.setColor(rnd_Color);
+  mydisp.clearScreen();
   mydisp.setColor(191);
   mydisp.setPrintPos(0,0,0);
-  //mydisp.setColor(rnd_Color);
-  mydisp.print("EVSE@Home");
-  //mydisp.drawStr(0, 0, "EVSE by SchuschiLab");
   
+  mydisp.print("EVSE@Home");
   mydisp.drawHLine(0,14,160);
   mydisp.drawHLine(30,31,135);
   mydisp.drawHLine(0,48,160);
   mydisp.drawHLine(0,65,115);
   mydisp.drawHLine(0,82,115);
   mydisp.drawHLine(0,99,160);
-  //mydisp.drawVLine(65,13,128);
-  
-  //Serial.print("Farbcode: ");
-  //Serial.println(rnd_Color);
-  //mydisp.drawStr(0, 2, "Farbcode: ");
+ 
   mydisp.drawBitmap256(2, 19, 25, 26, homeimage);
   mydisp.drawBitmap256(115, 65, 45, 21, carimage);
-  
-  
 }  
 void show_batterie(float state,byte pos_x, byte pos_y, byte color)
 {  
@@ -1670,9 +1590,7 @@ int getFEMSData(String sValue) //FEMS Rest API Client see: https://docs.fenecon.
     //Example URL="http://x:user@192.168.1.24:8084/rest/channel/_sum/EssSoc"; //State of Charge
     //See Documentation FEMS API: 
     //        https://docs.fenecon.de/de/_/latest/fems/apis.html#_fems_app_restjson_api_lesend
-    //
-    //
-    String URL="http://x:user@"+setIP+":8084/rest/channel/_sum/"; //Hausverbrauch
+    String URL="http://x:user@"+setIP+":8084/rest/channel/_sum/"; //Base Url 
     
     URL=URL+sValue;
     http.begin(client, URL);
@@ -1687,9 +1605,6 @@ int getFEMSData(String sValue) //FEMS Rest API Client see: https://docs.fenecon.
        // get lenght of document (is -1 when Server sends no Content-Length header)
        // Parse response 
        deserializeJson(doc, http.getStream());
-       // Read values
-       //Serial.print("Value vom RestAPI: ");
-       //Serial.println(doc["value"].as<int>());
        
       }else {
       Serial.printf("[HTTP] GET... failed, error: %s\n", http.errorToString(httpCode).c_str());
@@ -1731,8 +1646,6 @@ void setze_CP_Signal( byte dutyCycle ) {
   Serial.print("setzte DutyCycle:");
   Serial.println(dutyCycle);
   ledcWrite(CP_Channel, dutyCycle);
-  //Serial.print("CP-Signal setzten: ");
-  //Serial.println(dutyCycle);
   Pulsweite = dutyCycle;
   delay(300);
 }
