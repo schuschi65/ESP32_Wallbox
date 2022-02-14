@@ -111,7 +111,7 @@ const byte PULSWEITE [5] = {   255*10/100,   255*16/100, 255*25/100 , 255*30/100
 
 // Durch die folgenden Werte werden die ADC-Messwerte dividiert, um die Spannung am CP-Pin zu erhalten.
 // PWM to Spannung 1000 hz = 1 ms: Um=Uaus+((Uein−Uaus)⋅tein/(tein+taus))  Uaus=-12V Uein=12V  tein=1000*Pulsweite/255 taus=1000-tein=1000-(1000*Pulsweite/255)  
-const uint16_t  FAKTOR_PLUS[5]={9,17,29,34,44};  //original {9,17,29,34,44};
+const uint16_t  FAKTOR_PLUS[5]={8,17,29,34,44};  //original {9,17,29,34,44};
 const byte STROM[5] = { 6, 10 , 15 , 18 , 24 };
 byte Fehlercode = 0;  // 0 bedeutet: kein Fehler. Andere mögliche Werte sind die mit F_ gekennzeichneten Konstanten (siehe oben unter DEFINITIONEN).
 
@@ -965,23 +965,23 @@ void loop()
         byte color;
         if(pfVerbrauch[z]<3000)color=24;
         else color=224;
-        show_batterie(pfVerbrauch[z]/1000,-5,49,color);
+        show_batterie(float(pfVerbrauch[z])/1000,-5,49,color);
         mydisp.setFont(10);
         mydisp.setColor(191);
         mydisp.setPrintPos(0,6,0);
         mydisp.print("Verbrauch ");
-        mydisp.print(float(pfVerbrauch[z]/1000));
+        mydisp.print(float(pfVerbrauch[z])/1000);
         mydisp.print("kW ");
       }  
     }
     // todo: Ladestärke realwerte einbauen
     if (Betriebsphase == 3){
-       show_batterie(STROM[Stromstaerke]*2*235/1000,-5,66,244);  //Auto mit 2 Phasen (VW-Konzern)
+       show_batterie(float(STROM[Stromstaerke]*2*235)/1000,-5,66,244);  //Auto mit 2 Phasen (VW-Konzern)
        mydisp.setFont(10);
        mydisp.setColor(191);
        mydisp.setPrintPos(0,8,0);
        mydisp.print("Auto ");
-       mydisp.print(float(STROM[Stromstaerke]*2*235/1000));      //Auto mit 2 Phasen (VW-Konzern)
+       mydisp.print(float(STROM[Stromstaerke]*2*235)/1000);      //Auto mit 2 Phasen (VW-Konzern)
        mydisp.print(" ");
     }else{
        show_batterie(0,-5,66,244);
@@ -1037,10 +1037,6 @@ void loop()
   // Read the first line of the request
   /////////////////////////////////////
   String sRequest = client.readStringUntil('\r');
-  //client.flush();
-  //Serial.println(sRequest);
-  ///Test!!!!
-  String sread_the_rest = client.readStringUntil('\n\r\n');
   
   // stop client, if request is empty
   if(sRequest=="")
@@ -1092,6 +1088,7 @@ void loop()
       if (sCmd=="R6A")        Stromstaerke=0;
       else if(sCmd=="R10A")   Stromstaerke=1;
       else if (sCmd=="R15A")  Stromstaerke=2;
+      else if (sCmd=="R18A")  Stromstaerke=3;
       else                    Stromstaerke=0;
       Serial.println(sCmd);
     }
@@ -1190,25 +1187,36 @@ void loop()
     sResponse += sLine12;
     sResponse += F("<br>");
     sResponse += sLine13;
-    sResponse += F("<br/>Ladestart: ");
+    sResponse += F("<br/>Lademenge: ");
+    if( Betriebsphase == 3 ){
+       sResponse += float((cur_time-Start_Load)/3600*STROM[Stromstaerke]*2*235)/1000;  
+    }else{
+      sResponse += float((Stop_Load-Start_Load)/3600*STROM[Stromstaerke]*2*235)/1000;  
+    }
+    
+    sResponse += F(" kWh<br/>Ladestart: ");
     sResponse += ctime(&Start_Load);
-    sResponse += F("<br/>Ladestop: ");
-    sResponse += ctime(&Stop_Load);
-    sResponse += F("</font><br>");
+    sResponse += F("<br/>Ladezeit: ");
+    if( Betriebsphase == 3 ){
+      sResponse += float(cur_time-Start_Load)/60;
+    }else{
+      sResponse += float(Stop_Load-Start_Load)/60;
+    } 
+    sResponse += F(" Minuten</font><br>");
     //style=\"float:left\"
     sResponse +=F("<div id=\"chart_div\" ></div>");
     sRes2 += F("<p>");
     sRes2 += F("<a href=\"?pin=R6A\" class=\"button ");
     if (Stromstaerke==0) sRes2+=F("button3");
     else sRes2+=F("button2");
-    sRes2 += F("\">6A</a>&nbsp;<a href=\"?pin=R10A\" class=\"button ");
+    sRes2 += F("\">2.8kWh</a>&nbsp;<a href=\"?pin=R10A\" class=\"button ");
     if (Stromstaerke==1) sRes2+=F("button3");
     else sRes2+=F("button2");
-    sRes2 += F("\">10A</a>&nbsp;");
+    sRes2 += F("\">4.6kWh</a>&nbsp;");
     sRes2 += F("<a href=\"?pin=R15A\" class=\"button ");
     if (Stromstaerke==2) sRes2+=F("button3");
     else sRes2+=F("button2");
-    sRes2 += F("\">15A</a></p>");
+    sRes2 += F("\">6.9kWh</a></p>");
 
     
     sRes2 += F("<p style=\"float:left;\"><FONT SIZE=+2><a href=\"/grafik\" class=\"button\"> Grafik</a><a href=\"/tabelle\" class=\"button\"> Tabelle</a><a href=\"/\" class=\"button\">Reload</a><a href=\"/config\" class=\"button button3\">Config</a>");
@@ -1308,7 +1316,13 @@ void loop()
     sRes2 += ctime(&Start_Load);
     sRes2 += F("<br>Ladestop: ");
     sRes2 += ctime(&Stop_Load);
-    sRes2 += F("<br>Fortschritt:");
+    sRes2 += F("<br/>Ladezeit: ");
+    if( Betriebsphase == 3 ){
+      sRes2 += float(cur_time-Start_Load)/60;
+    }else{
+      sRes2 += float(Stop_Load-Start_Load)/60;
+    } 
+    sRes2 += F(" Minuten<br>Fortschritt:");
     sRes2 += F("<div id=\"P\"><div id=\"B\">");
     sRes2 += Progress/10000;
     sRes2 += F("%</div></div>");
@@ -1319,14 +1333,14 @@ void loop()
     sRes2 += F("<a href=\"?pin=R6A\" class=\"button ");
     if (Stromstaerke==0) sRes2+=F("button3");
     else sRes2+=F("button2");
-    sRes2 += F("\">6A</a>&nbsp;<a href=\"?pin=R10A\" class=\"button ");
+    sRes2 += F("\">2.8kWh</a>&nbsp;<a href=\"?pin=R10A\" class=\"button ");
     if (Stromstaerke==1) sRes2+=F("button3");
     else sRes2+=F("button2");
-    sRes2 += F("\">10A</a>&nbsp;");
+    sRes2 += F("\">4.6kWh</a>&nbsp;");
     sRes2 += F("<a href=\"?pin=R15A\" class=\"button ");
     if (Stromstaerke==2) sRes2+=F("button3");
     else sRes2+=F("button2");
-    sRes2 += F("\">15A</a></p>");
+    sRes2 += F("\">6.9kWh</a></p>");
     
     sRes2 += F("<div id=\"curve_chart\" style=\"width: 100%; height: 500px\"></div>");
     sRes2 += F("<p><a href=\"/tabelle\" class=\"button\"> Tabelle</a><a href=\"/\" class=\"button\">Home</a><a href=\"/config\" class=\"button button3\">Config</a>");
@@ -1372,7 +1386,7 @@ void loop()
     sResponse += F("<script>\n");
     sResponse += F("function SaveConfig(){nocache = \"&nocache=\" + Math.random() * 1000000;\n var request = new XMLHttpRequest();\n");
     //Parameter auslesen
-    sResponse += F("request.onreadystatechange = function() { if (this.readyState == 4 && this.status == 200)\n {document.write(request.responseText); } };\n");
+    sResponse += F("request.onreadystatechange = function() { if (this.readyState == 4 && this.status == 200)\n {window.location='/';} };\n");
     sResponse += F("strLine1=\"&L1=\"+document.getElementById(\"txt_form\").sensor.value;\n");
     sResponse += F("strLine2=\"&L2=\"+document.getElementById(\"txt_form\").SOC.value;");
     sResponse += F("request.open(\"GET\", \"ajax_inputs\" +strLine1+strLine2+nocache,true);\n request.send(null);}</script>");
@@ -1427,17 +1441,23 @@ void loop()
     sHeader += sResponse.length();
     sHeader += F("\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n");
   }
-  
+  while (client.available()) {
+    // but first, let client finish its request
+    // that's diplomatic compliance to protocols
+    // (and otherwise some clients may complain, like curl)
+    // (that is an example, prefer using a proper webserver library)
+    client.read();
+  }
   // Send the response to the client
-  client.print(sHeader);
-  sHeader=F("");
-  client.print(sResponse); 
-  sResponse=F("");
-  //Serial.println("Page send mit sPath: ");
-  //Serial.println(sPath);
+  client.println(sHeader + sResponse + "\n");
+  delay(1);
+  //client.print(sResponse2);
+  //Serial.println(sHeader);
+  //Serial.println("Client disonnected");
+  
   if(sPath=="/tabelle") MakeTable(&client,true);
   if(sPath=="/grafik")  MakeList(&client,true);
-  client.print(sRes2);
+  client.print(sRes2+ "\n");
   sRes2=F("");
   client.stop();
 
