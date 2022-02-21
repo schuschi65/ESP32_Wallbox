@@ -23,6 +23,7 @@ Software:
 #define _Digole_Serial_I2C_           //To tell compiler compile the special communication only, 
 #include <DigoleSerial.h>             //https://www.digole.com/forum.php?topicID=1
 #include <WiFi.h>
+#include <ArduinoOTA.h>
 #include <WiFiClient.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
@@ -75,7 +76,8 @@ unsigned long ulNextMeas_ms;         // next meas time
 unsigned long ulNextPrint_ms;        // next display change time
 unsigned long ulPrintDelta_ms =1500; // Display Aktualisierung
 unsigned long ulReqcount;       // how often has a valid page been requested
-
+float Lademenge;
+float SumLademenge;
 String sLine13, sLine12;
 
 //Ladebox spezifische Parameter
@@ -310,6 +312,7 @@ void setup()
   refresh_Home=millis()+(1000*3600);  //Display refresh jede Stunde
   letzte_Messung = millis();
   digitalWrite( O_WAKEUP, HIGH );  // Schalte CP Signal zum Auto an.
+  OTAStart();
 }
 
 
@@ -665,6 +668,7 @@ bool CP_messen(){
 /////////////
 void loop() 
 {
+   ArduinoOTA.handle();
   cur_time = time(nullptr);
   //Timer reset bei überlauf
   if (millis()<ulcurrentmillis){last_pub=0; CP_Messung=0;refresh_Home=0;} 
@@ -757,6 +761,8 @@ void loop()
   }    
   else if( Betriebsphase == 2 ) {  // Betriebsphase 2: Warte auf Bereitschaft des E-Autos.
     Progress=0; 
+    SumLademenge+=Lademenge;
+    Lademenge=0;
     switch( Status_Fahrzeug ) {
       case PLUS_12_V:  // Wenn das Auto nicht mehr angeschlossen ist, gehe zurück zur Ladestrom-Einstellung.
       Betriebsphase_1();
@@ -781,39 +787,40 @@ void loop()
     
     switch( Status_Fahrzeug ) {
       case PLUS_12_V: // Elektroauto ist plötzlich nicht mehr angeschlossen.
-      Fehler( F_NOTABBRUCH );
-      Stop_Load= time(nullptr);
+         Fehler( F_NOTABBRUCH );
+         Stop_Load= time(nullptr);
       break;
       case PLUS_9_V:  // Elektroauto hat fertig geladen oder Benutzer hat Ladevorgang beendet.
-      digitalWrite( O_LADUNG, LOW );  // Schalte die Stromzufuhr zum E-Auto ab.
-      Stop_Load= time(nullptr);
-      timeinfo = localtime(&Stop_Load); 
-      year = timeinfo->tm_year+1900;
-      month = timeinfo->tm_mon+1;   
-      day = timeinfo->tm_mday;    
-      hour = timeinfo->tm_hour;
-      minutes = timeinfo->tm_min;
-      seconds = timeinfo->tm_sec;
-      sTime=String(hour)+":"+String(minutes)+":"+String(seconds)+" - "+String(day)+"."+String(month)+".";
-      print_Line13("stop:   "+ sTime);
-      print_Line12("car load done...  ");
-      Betriebsphase = 4;  // Gehe in Betriebsphase 4.
+         digitalWrite( O_LADUNG, LOW );  // Schalte die Stromzufuhr zum E-Auto ab.
+         Stop_Load= time(nullptr);
+         timeinfo = localtime(&Stop_Load); 
+         year = timeinfo->tm_year+1900;
+         month = timeinfo->tm_mon+1;   
+         day = timeinfo->tm_mday;    
+         hour = timeinfo->tm_hour;
+         minutes = timeinfo->tm_min;
+         seconds = timeinfo->tm_sec;
+         sTime=String(hour)+":"+String(minutes)+":"+String(seconds)+" - "+String(day)+"."+String(month)+".";
+         print_Line13("stop:   "+ sTime);
+         print_Line12("car load done...  ");
+         Betriebsphase = 4;  // Gehe in Betriebsphase 4.
       break;
-      case PLUS_6_V:  // Elektroauto lädt! aber Stromzufuhr soll aus geschaltet werden weil zuwenig Strom vorhanden oder Modus geäander werden soll.
-      if(fSOC+10<(setSOC)){    //10% SOC Konstante Hysterese
+      case PLUS_6_V:  // Elektroauto lädt! 
+         if(fSOC+5<(setSOC)){    //5% SOC Konstante Hysterese aber Stromzufuhr soll aus geschaltet werden weil zuwenig Strom vorhanden oder Modus geäander werden soll.
            print_Line13("load pausing...  ");
            digitalWrite( O_WAKEUP, LOW );  // Schalte CP Signal zum Auto ab.
            Progress=0;  
-      }else{
-         if (Progress/10000>100) Progress=0; 
-         else Progress+=0.02; 
-         
-         print_Line12("car loading....  ");
-         digitalWrite( O_LADUNG, HIGH );  // Schalte die Stromzufuhr zum E-Auto an.  
-      }
+         }else{
+           if (Progress/10000>100){ Progress=0;} 
+           else {Progress+=0.02;} 
+           Lademenge=(float)(cur_time-Start_Load)/3600*STROM[Stromstaerke]*2*235/1000.00;  
+           //print_Line12("car loading....  ");
+           print_Line12("loading: "+String(Lademenge,2));
+           digitalWrite( O_LADUNG, HIGH );  // Schalte die Stromzufuhr zum E-Auto an.  
+         }
       break;
       case PLUS_3_V:  // Wenn das Elektroauto eine Belüftung anfordert und diese nicht erlaubt ist, beende den Ladevorgang:
-      if( !BELUEFTUNG ) Fehler( F_BELUEFTUNG );
+         if( !BELUEFTUNG ) Fehler( F_BELUEFTUNG );
       break;
     }
   } 
@@ -1121,20 +1128,22 @@ void loop()
   {
     unsigned long z=ulMeasCount%ulNoMeasValues-1;
     ulReqcount++;
-    sResponse = F("<!DOCTYPE html><html lang=\"en\"><head>");
-    sResponse +=F("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta http-equiv=\"refresh\" content=\"");
+    sResponse = F("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
+    sResponse +=F("<meta http-equiv=\"refresh\" content=\"");
     sResponse +=ulMeasDelta_ms/1000;
     sResponse +=F(";URL=/\">");
     sResponse +=F("<title>");
-    sResponse +=ipaddress;
-    sResponse +=F("@");
     sResponse +=SensorName;
+    sResponse +=F("@");
+    sResponse +=ipaddress;
     sResponse += F("</title>");
+    sResponse += F("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
     sResponse += F("<link rel=\"icon\" href=\"data:,\">");
-    sResponse += F("<style> .button {background-color: #4CAF50; border: none; color: white; padding: 15px 30px; text-align: center; text-decoration: none; display: inline-block; font-size: 18px; margin: 4px 2px; cursor: pointer; }");
-    sResponse += F(".button2 {background-color: #008CBA;}");
-    sResponse += F(".button3 {background-color: #f44336;}");
-    sResponse += F("</style>");
+    sResponse += F("<style>.button{background-color: #4CAF50;border: none; color: white; padding: 10px 15px; text-align: center; text-decoration: none; display: inline-block; font-size: 15px; margin: 4px 2px; cursor: pointer; }");
+    sResponse += F(".button2 {background-color: #008CBA;} /* Blue */");
+    sResponse += F(".button3 {background-color: #f44336;} /* Red */ .topnav {overflow: hidden; background-color: #50B8B4; color: white; font-size: 1rem; max-width: 50em;text-align:center;margin:.5em;padding:.5em;}");
+    sResponse += F(".flex-container{display:flex;max-width: 50em;}.wrap{flex-wrap: wrap;} .flex-item{flex:auto; margin:.5em;padding:.5em;background:white;text-align:center; box-shadow: 2px 2px 12px 1px rgba(140,140,140,.5);}</style>");
+    sResponse += F("</head><body {margin: 0; background: white;}>");
     sResponse += F("<script type=\"text/javascript\" src=\"https://www.gstatic.com/charts/loader.js\"></script>\n");
     sResponse += F("<script type=\"text/javascript\"> google.charts.load('current', {'packages':['gauge']}); google.charts.setOnLoadCallback(drawChart);");
     sResponse += F("function drawChart() {");
@@ -1151,20 +1160,15 @@ void loop()
     sResponse += F("var options={max:100,width:400,height:120,redFrom:0,redTo:25,yellowFrom:25,yellowTo:75,greenFrom:75,greenTo:100,minorTicks:10,majorTicks:['0','25','50','75','100']};");
     sResponse += F("var chart=new google.visualization.Gauge(document.getElementById('chart_div'));");
     sResponse += F("chart.draw(data,options);}");
-    sResponse += F("</script>\n</head>\n");
-    sResponse += F("<body>\n<font color=\"#000000\"><body bgcolor=\"#d0d0f0\">");
-    sResponse += F("<h1>");
-    sResponse +=SensorName;
-    sResponse += F("@");
+    sResponse += F("</script>\n");
+    sResponse += F("<script type=\"text/javascript\">function myhref(web){window.location.href = web;}</script>");
+    sResponse += F("<font color=\"#000000\">");
+    sResponse += F("<div class=\"topnav\"><h2>");
+    sResponse += SensorName;
+    sResponse += "@";
     sResponse += ipaddress;
-    sResponse += F("</h1>");
-    sResponse += F("WLAN: ");
-    sResponse += Router_SSID;
-    sResponse += F("<br />");
-    sResponse += F("StartupTime: ");
-    sResponse += ctime(&Startup_time);
-    sResponse += F("<br />");
-    sResponse += F("Zeit: ");
+    sResponse += F("</h2></div>");
+    
     struct tm * timeinfo;
     timeinfo = localtime(&cur_time); 
     int year = timeinfo->tm_year+1900;
@@ -1173,10 +1177,23 @@ void loop()
     int hour = timeinfo->tm_hour;
     int minutes = timeinfo->tm_min;
     int seconds = timeinfo->tm_sec;
-    sResponse += String(hour)+":"+String(minutes)+"."+String(seconds);
-    sResponse += F("&nbsp; &nbsp;");
-    sResponse += String(day)+"."+String(month)+"."+String(year);
-    sResponse += F("<br/>");
+    
+    sResponse += F("<div class=\"flex-container wrap\">");
+    sResponse += F("<p class=\"flex-item\" onmouseover=\"this.style.background='gray';\" onmouseout=\"this.style.background='white';\" onclick=\"myhref('/config');\">Zeit: ");
+    sResponse += String(hour) + ":" + String(minutes) + ":" + String(seconds);
+    //sResponse += "</p><p class=\"flex-item\">";
+    sResponse += "<br>Datum:" + String(day) + "." + String(month) + "." + String(year);
+    sResponse += F("<br>WLAN: ");
+    sResponse += Router_SSID;
+    sResponse += F("<br>Signal: ");
+    if (rssi >= -50) sResponse += F("100");
+    else sResponse += 2 * (rssi + 100);
+    sResponse += F("% <br>DeviceID: ");
+    sResponse += deviceID;
+    sResponse += F("<br>StartupTime: ");
+    sResponse += ctime(&Startup_time);
+    sResponse += F("</p></div>");
+    sResponse += F("<div class=\"flex-container wrap\"><p class=\"flex-item\">");
     sResponse += F("Status: ");
     sResponse += Stromstaerke;
     sResponse += F(" : ");
@@ -1187,23 +1204,31 @@ void loop()
     sResponse += sLine12;
     sResponse += F("<br>");
     sResponse += sLine13;
-    sResponse += F("<br/>Lademenge: ");
-    if( Betriebsphase == 3 ){
-       sResponse += float((cur_time-Start_Load)/3600*STROM[Stromstaerke]*2*235)/1000;  
-    }else{
-      sResponse += float((Stop_Load-Start_Load)/3600*STROM[Stromstaerke]*2*235)/1000;  
-    }
+    sResponse += F("</p>");
     
-    sResponse += F(" kWh<br/>Ladestart: ");
+    sResponse += F("<p class=\"flex-item\">Gesamtenergie<br>Auto laden: ");
+    sResponse += SumLademenge;
+    sResponse += F(" kWh</p>");
+    
+    sResponse += F("<p class=\"flex-item\">");
+    sResponse += F("Ladestart: ");
     sResponse += ctime(&Start_Load);
-    sResponse += F("<br/>Ladezeit: ");
+    sResponse += F("<br>Ladezeit: ");
     if( Betriebsphase == 3 ){
       sResponse += float(cur_time-Start_Load)/60;
-    }else{
-      sResponse += float(Stop_Load-Start_Load)/60;
-    } 
-    sResponse += F(" Minuten</font><br>");
-    //style=\"float:left\"
+      sResponse += F(" Minuten");
+    }
+    sResponse += F("</p><p class=\"flex-item\" onmouseover=\"this.style.background='gray';\" onmouseout=\"this.style.background='white';\" onclick=\"myhref('/grafik');\">Lademenge: ");
+    sResponse += Lademenge;
+    sResponse += F(" kWh<br/>Autobatterie geladen: ");
+    sResponse += Lademenge/17*100;
+    sResponse += F(" %<br/>Reichweite: ");
+    sResponse += Lademenge/25*100;
+    sResponse += F(" Kilometer</p>");
+    sResponse += F("</div></font>");
+
+    
+    
     sResponse +=F("<div id=\"chart_div\" ></div>");
     sRes2 += F("<p>");
     sRes2 += F("<a href=\"?pin=R6A\" class=\"button ");
@@ -1217,12 +1242,7 @@ void loop()
     if (Stromstaerke==2) sRes2+=F("button3");
     else sRes2+=F("button2");
     sRes2 += F("\">6.9kWh</a></p>");
-
-    
-    sRes2 += F("<p style=\"float:left;\"><FONT SIZE=+2><a href=\"/grafik\" class=\"button\"> Grafik</a><a href=\"/tabelle\" class=\"button\"> Tabelle</a><a href=\"/\" class=\"button\">Reload</a><a href=\"/config\" class=\"button button3\">Config</a>");
-    sRes2 += F("<FONT SIZE=-2>");
-    sRes2 += F("<br />");
-    sRes2 += F("Aufrufz&auml;hler="); 
+    sRes2 += F("<FONT SIZE=-2>Aufrufz&auml;hler="); 
     sRes2 += ulReqcount;
     sRes2 += F(" - Verbindungsz&auml;hler="); 
     sRes2 += ulReconncount;
@@ -1593,8 +1613,8 @@ void Fehler( byte fehlercode ) {
   }
   else {
     digitalWrite( O_LADUNG, LOW );  // Schalte die Stromzufuhr zum E-Auto ab.
-    Serial.print("Fehlercode: ");
-    Serial.println(fehlercode);
+    //Serial.print("Fehlercode: ");
+    //Serial.println(fehlercode);
     setze_CP_Signal( 0 );  // Setze den CP-Pin auf -12 V.
     Fehlercode = fehlercode; // Speichere den Fehlercode, damit anschließend die Fehler-LED entsprechend blinken kann.
     Betriebsphase = 5;
@@ -1603,8 +1623,8 @@ void Fehler( byte fehlercode ) {
   }
 }
 void setze_CP_Signal( byte dutyCycle ) {
-  Serial.print("setzte DutyCycle:");
-  Serial.println(dutyCycle);
+  //Serial.print("setzte DutyCycle:");
+  //Serial.println(dutyCycle);
   ledcWrite(CP_Channel, dutyCycle);
   Pulsweite = dutyCycle;
   delay(500);
@@ -1647,4 +1667,54 @@ void Ladevorgang_starten() {
       String sTime=String(hour)+":"+String(minutes)+":"+String(seconds)+" - "+String(day)+"."+String(month)+".";
       print_Line13("start: "+sTime);
       digitalWrite( O_LADUNG, HIGH );  // Schalte die Stromzufuhr zum Elektrofahrzeug ein.
+}
+void OTAStart() {
+  // Port defaults to 8266
+  // ArduinoOTA.setPort(8266);
+
+  // Hostname defaults to esp8266-[ChipID]
+  ArduinoOTA.setHostname(SensorName.c_str());
+
+  // No authentication by default
+  // ArduinoOTA.setPassword("admin");
+
+  // Password can be set with it's md5 value as well
+  // MD5(admin) = 21232f297a57a5a743894a0e4a801fc3
+  // ArduinoOTA.setPasswordHash("21232f297a57a5a743894a0e4a801fc3");
+
+  ArduinoOTA.onStart([]() {
+    String type;
+    if (ArduinoOTA.getCommand() == U_FLASH) {
+      type = "sketch";
+    } else { // U_FS
+      type = "filesystem";
+    }
+
+    // NOTE: if updating FS this would be the place to unmount FS using FS.end()
+    Serial.println("Start updating " + type);
+  });
+  ArduinoOTA.onEnd([]() {
+    Serial.println("\nEnd");
+  });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) {
+      Serial.println("Auth Failed");
+    } else if (error == OTA_BEGIN_ERROR) {
+      Serial.println("Begin Failed");
+    } else if (error == OTA_CONNECT_ERROR) {
+      Serial.println("Connect Failed");
+    } else if (error == OTA_RECEIVE_ERROR) {
+      Serial.println("Receive Failed");
+    } else if (error == OTA_END_ERROR) {
+      Serial.println("End Failed");
+    }
+  });
+  ArduinoOTA.begin();
+  Serial.println("OTA Ready");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
 }
