@@ -16,7 +16,6 @@ Software:
 - HTTP Server zur Steuerung und Visualisierung 
 - Rest API FENECON Pro Hybrid 10-Serie siehe: https://docs.fenecon.de/de/_/latest/fems/apis.html#_fems_app_restjson_api_lesend
 - UDP Interface zur weiteren Nutzung der Messwerte Inhouse
-
 ---------------------------------------------------*/
 #define SC_W 160  //screen width in pixels
 #define SC_H 128  //screen Hight in pixels
@@ -52,14 +51,14 @@ int32_t rssi;
 byte numSsid = 0;
 String Router_SSID;
 String Router_Pass;
-String SensorName="MyNewDevice";      // Name des Sensors
+String SensorName="Wallbox";      // Name des Sensors
 /////////////////////////////////////////////////////////////////////////
 //                             FEMS Rest API (Daten aus der Hausanlage)
 ////////////////////////////////////////////////////////////////////////
 uint8_t fSOC;                            //Aktueller State of Charge der Batterie 
 float fPower;                          // Power von Solaranlage  
 uint8_t setSOC=95;                       // Defaultwert SOC aus Config.html
-String setIP="192.168.1.24";          // Defaultwerte für FEMS REST API
+String setIP="fems1183.schuschi";          // Defaultwerte für FEMS REST API
 WiFiClient restAPI;
 /////////////////////////////////////////////////////////////////////////
 //                             ntp timestamp
@@ -267,7 +266,7 @@ void setup()
   ads.setMeasureMode(ADS1115_CONTINUOUS);
   ads.setConvRate(ADS1115_64_SPS);
   
-  uint32_t free=system_get_free_heap_size() - KEEP_MEM_FREE;
+  uint32_t free=esp_get_free_heap_size() - KEEP_MEM_FREE;
   Serial.print("freeHeap:");
   Serial.println(free);
   ulNoMeasValues = free / (sizeof(uint8_t)+2*sizeof(uint16_t)+sizeof(unsigned long));  // SOC+PowerSolar+time 
@@ -692,8 +691,8 @@ void loop()
   //Timer CP Messung
   if (ulcurrentmillis>=CP_Messung||Pulsweite!=letzte_Pulsweite){
       Ergebnis_korrekt=CP_messen();
-      //Serial.print("Returnwert aus CP_messen()=");
-      //Serial.println(Ergebnis_korrekt);
+      //Serial.print("Returnwerte aus CP_messen()=");
+      //Serial.print(Ergebnis_korrekt);Serial.println("Messwert: ");Serial.println(Ergebnis);
       CP_Messung=ulcurrentmillis+(500);
       letzte_Pulsweite=Pulsweite; 
   }
@@ -809,7 +808,7 @@ void loop()
          if(fSOC+5<(setSOC)){    //5% SOC Konstante Hysterese aber Stromzufuhr soll aus geschaltet werden weil zuwenig Strom vorhanden oder Modus geäander werden soll.
            print_Line13("load pausing...  ");
            digitalWrite( O_WAKEUP, LOW );  // Schalte CP Signal zum Auto ab.
-           Progress=0;  
+           //Progress=0;  
          }else{
            if (Progress/10000>100){ Progress=0;} 
            else {Progress+=0.02;} 
@@ -922,7 +921,7 @@ void loop()
     d2d_say_boring_life();
     ulMeasCount++;
   }
-   if (millis()>=ulNextPrint_ms) 
+  if (millis()>=ulNextPrint_ms) 
   {
     ulNextPrint_ms = millis()+ulMeasDelta_ms;
     struct tm * timeinfo;
